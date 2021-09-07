@@ -107,13 +107,8 @@ echo "5--- cloning grpc repo ---" && \
 
 OVS_RELEASE_TAG="branch-2.12"
 echo "6--- installing openvswitch dependancies ---" && \
-    # On a fresh machine, libuuid may not be there, check and install
-    if [ -f /usr/include/uuid/uuid.h ]; then
-        true
-    else
-        sudo apt install uuid-dev:amd64
-        sudo apt install uuid-runtime
-    fi
+    apt-get install uuid-dev:amd64 && \
+    apt-get install uuid-runtime && \
     git clone -b $OVS_RELEASE_TAG https://github.com/openvswitch/ovs.git /var/local/git/openvswitch && \
     cd /var/local/git/openvswitch && \
     ./boot.sh && \
