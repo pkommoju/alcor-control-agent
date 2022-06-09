@@ -455,7 +455,7 @@ int ACA_OVS_L3_Programmer::create_or_update_router(RouterConfiguration &current_
     if (!is_router_exist || (current_RouterConfiguration.update_type() == UpdateType::FULL)) {
       // -----critical section starts-----
       _routers_table_mutex.lock();
-      _routers_table.emplace(router_id, new_subnet_routing_tables);
+      _routers_table[router_id] = new_subnet_routing_tables;
       _routers_table_mutex.unlock();
       // -----critical section ends-----
       ACA_LOG_INFO("Added router entry for router id %s\n", router_id.c_str());
@@ -829,6 +829,94 @@ int ACA_OVS_L3_Programmer::create_or_update_router(RouterConfiguration &current_
             new_routing_rule_entry.next_hop_mac =
                     current_routing_rule.routing_rule_extra_info().next_hop_mac();
 
+            auto remote_host_ip = "";
+            ulong culminative_dataplane_programming_time = 0;
+            for (auto each_neighbor : parsed_struct.neighbor_states()) {
+              NeighborConfiguration current_NeighborConfiguration1 =
+                      each_neighbor.second.configuration();
+              ACA_LOG_INFO("current_NeighborConfiguration.host_ip_address(): %s \n",
+                            current_NeighborConfiguration1.host_ip_address().c_str());
+              for (int y = 0; y < current_NeighborConfiguration1.fixed_ips_size(); y++) {
+                ACA_LOG_INFO("current_NeighborConfiguration.fixed_ips(%d): neighbor_type: %d, subnet_id %s, ip_address %s \n",
+                              y, current_NeighborConfiguration1.fixed_ips(y).neighbor_type(),
+                              current_NeighborConfiguration1.fixed_ips(y)
+                                      .subnet_id()
+                                      .c_str(),
+                              current_NeighborConfiguration1.fixed_ips(y)
+                                      .ip_address()
+                                      .c_str());
+                ACA_LOG_INFO("current_routing_rule.next_hop_ip() %s\n",
+                              current_routing_rule.next_hop_ip().c_str());
+                auto current_fixed_ip = current_NeighborConfiguration1.fixed_ips(y);
+                string virtual_ip_address = current_fixed_ip.ip_address();
+                string virtual_mac_address =
+                        current_NeighborConfiguration1.mac_address();
+                string subnet_id_of_fixed_ip = current_fixed_ip.subnet_id();
+                string gw_mac;
+                uint dest_tunnel_id = 0;
+
+                if (strcmp(current_routing_rule.next_hop_ip().c_str(),
+                  current_fixed_ip.ip_address().c_str()) == 0) {
+                  auto subnet_iterator = parsed_struct.subnet_states().find(subnet_id_of_fixed_ip);
+                  if (subnet_iterator != parsed_struct.subnet_states().end()) {
+                    gw_mac = subnet_iterator->second.configuration().gateway().mac_address();
+                    dest_tunnel_id = subnet_iterator->second.configuration().tunnel_id();
+                    ACA_LOG_INFO("gw_mac: %s\n", gw_mac.c_str());
+                    ACA_LOG_INFO("dest_tunnel_id: %d\n", dest_tunnel_id);
+                  } else {
+                    ACA_LOG_INFO("Founding find subnet ID: [%s] in the goalstate", subnet_id_of_fixed_ip);
+                  }
+                  
+                  remote_host_ip =
+                          current_NeighborConfiguration1.host_ip_address().c_str();
+                  int source_vlan_id =
+                          ACA_Vlan_Manager::get_instance().get_or_create_vlan_id(found_tunnel_id);
+
+                  int destination_vlan_id =
+                          ACA_Vlan_Manager::get_instance().get_or_create_vlan_id(dest_tunnel_id);
+
+                  bool is_port_on_same_host =
+                          ACA_OVS_L2_Programmer::get_instance().is_ip_on_the_same_host(remote_host_ip);
+
+                  ACA_LOG_INFO("current_fixed_ip.subnet_id(): %s\n",
+                                current_fixed_ip.subnet_id().c_str());
+                  ACA_LOG_INFO("current_subnet_routing_table.subnet_id(): %s\n",
+                                current_subnet_routing_table.subnet_id().c_str());
+
+                  if (is_port_on_same_host) {
+                    if (current_fixed_ip.subnet_id() !=
+                        current_subnet_routing_table.subnet_id()) {
+                      cmd_string =
+                              "table=0,priority=50,ip,dl_vlan=" +
+                              to_string(source_vlan_id) +
+                              ",nw_dst=" + current_routing_rule.destination() +
+                              ",dl_dst=" + found_gateway_mac +
+                              " actions=mod_vlan_vid:" + to_string(destination_vlan_id) +
+                              ",mod_dl_src:" + gw_mac +
+                              ",mod_dl_dst:" + virtual_mac_address + ",output:IN_PORT";
+                    }
+                  } else {
+                    cmd_string =
+                            "table=0,priority=50,ip,dl_vlan=" +
+                            to_string(source_vlan_id) +
+                            ",nw_dst=" + current_routing_rule.destination() +
+                            ",dl_dst=" + found_gateway_mac +
+                            " actions=mod_vlan_vid:" + to_string(destination_vlan_id) +
+                            ",mod_dl_src:" + _host_dvr_mac +
+                            ",mod_dl_dst:" + virtual_mac_address + ",resubmit(,2)";
+                  }
+
+                  ACA_OVS_L2_Programmer::get_instance().execute_openflow(culminative_dataplane_programming_time,
+                          "br-tun",
+                          cmd_string,
+                          "add");
+                }
+              }
+              if (strcmp(remote_host_ip, "") != 0) {
+                break;
+              }
+            }
+
             if (!is_routing_rule_exist) {
               new_subnet_routing_table_entry.routing_rules.emplace(
                       current_routing_rule.id(), new_routing_rule_entry);
@@ -880,7 +968,7 @@ int ACA_OVS_L3_Programmer::create_or_update_router(RouterConfiguration &current_
     if (!is_router_exist || (current_RouterConfiguration.update_type() == UpdateType::FULL)) {
       // -----critical section starts-----
       _routers_table_mutex.lock();
-      _routers_table.emplace(router_id, new_subnet_routing_tables);
+      _routers_table[router_id] = new_subnet_routing_tables;
       _routers_table_mutex.unlock();
       // -----critical section ends-----
       ACA_LOG_INFO("Added router entry for router id %s\n", router_id.c_str());
@@ -962,10 +1050,7 @@ int ACA_OVS_L3_Programmer::create_or_update_l3_neighbor(
     ACA_LOG_DEBUG("router ID:%s\n ", router_it->first.c_str());
     // try to see if the destination subnet GW is connected to the current router
     auto found_subnet = router_it->second.find(subnet_id);
-    for (auto kv : router_it->second) {
-      ACA_LOG_DEBUG("[create_or_update_l3_neighbor] router ID: [%s], subnet routering table's subnet ID: [%s], subnet_id we're looking for: [%s]\n",
-                    router_it->first.c_str(), kv.first.c_str(), subnet_id.c_str());
-    }
+
     if (found_subnet == router_it->second.end()) {
       // subnet not found in this router, go look at the next router
       continue;
